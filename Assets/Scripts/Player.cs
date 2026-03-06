@@ -8,6 +8,7 @@ public class Player : MonoBehaviour
     [Header("Visuals")]
     public GameObject runPrefabObj;
     public GameObject slidePrefabObj;
+    public GameObject jumpPrefabObj;
 
     [Header("Jump")]
     public float jumpForce = 10f;
@@ -49,7 +50,7 @@ public class Player : MonoBehaviour
         rb = GetComponent<Rigidbody2D>();
         rb.constraints = RigidbodyConstraints2D.FreezePositionX | RigidbodyConstraints2D.FreezeRotation;
         spriteRenderers = GetComponentsInChildren<SpriteRenderer>();
-        SetSlide(false);
+        UpdateVisual();
 
         // 스크린 플래시 프리팹 인스턴스화 → Canvas 하위에 배치
         if (screenFlashPrefab != null)
@@ -87,6 +88,7 @@ public class Player : MonoBehaviour
             rb.linearVelocity = new Vector2(rb.linearVelocity.x, jumpForce);
             jumpsRemaining--;
             isGrounded = false;
+            UpdateVisual();
         }
     }
 
@@ -94,17 +96,16 @@ public class Player : MonoBehaviour
     {
         bool shiftHeld = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
 
-        if (shiftHeld && !isSliding)
-            SetSlide(true);
-        else if (!shiftHeld && isSliding)
-            SetSlide(false);
+        if (shiftHeld && !isSliding)      { isSliding = true;  UpdateVisual(); }
+        else if (!shiftHeld && isSliding) { isSliding = false; UpdateVisual(); }
     }
 
-    void SetSlide(bool sliding)
+    void UpdateVisual()
     {
-        isSliding = sliding;
-        if (runPrefabObj != null)   runPrefabObj.SetActive(!sliding);
-        if (slidePrefabObj != null) slidePrefabObj.SetActive(sliding);
+        bool jumping = !isGrounded && !isSliding; // 슬라이드 중에는 점프 비주얼 억제
+        if (runPrefabObj   != null) runPrefabObj.SetActive(!jumping && !isSliding);
+        if (jumpPrefabObj  != null) jumpPrefabObj.SetActive(jumping);
+        if (slidePrefabObj != null) slidePrefabObj.SetActive(isSliding);
     }
 
     // ── 충돌 ──────────────────────────────────────────
@@ -119,6 +120,7 @@ public class Player : MonoBehaviour
                 {
                     isGrounded     = true;
                     jumpsRemaining = 2;
+                    UpdateVisual();
                     break;
                 }
             }
@@ -137,7 +139,10 @@ public class Player : MonoBehaviour
     void OnTriggerEnter2D(Collider2D other)
     {
         if (other.CompareTag("Jelly"))
+        {
             Destroy(other.gameObject);
+            Score.Instance?.AddJelly();
+        }
 
         if (other.CompareTag("Obstacle"))
             HandleObstacleHit();

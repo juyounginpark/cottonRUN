@@ -41,8 +41,8 @@ public class Map : MonoBehaviour
     public float backgroundSpeedMultiplier = 0.5f;
 
     [Header("Obstacle Settings")]
-    public GameObject obstaclePrefab;
-    [Tooltip("타일 상단 기준 장애물 Y 오프셋")]
+    public ObstacleDatabase obstacleDatabase;
+    [Tooltip("장애물 콜라이더 하단 = 타일 상단 기준 추가 오프셋 (0 = 딱 맞춤)")]
     public float obstacleOffsetY = 0f;
     [Range(0f, 1f)]
     [Tooltip("타일 하나당 장애물 생성 확률")]
@@ -51,6 +51,14 @@ public class Map : MonoBehaviour
     public int obstacleMinGap = 3;
     [Tooltip("장애물 꼭대기 위로 젤리가 얼마나 더 높이 뜰지 (여유 높이)")]
     public float obstacleJellyClearance = 0.5f;
+
+    [Header("Obstacle Chunk Settings")]
+    [Tooltip("2연속 장애물 청크 확률 (서로 다른 종류 가능)")]
+    [Range(0f, 1f)]
+    public float chunkDoubleChance = 0.2f;
+    [Tooltip("3연속 장애물 청크 확률 (같은 종류만)")]
+    [Range(0f, 1f)]
+    public float chunkTripleChance = 0.1f;
 
     // ── 내부 상태 ──────────────────────────────────────
 
@@ -79,6 +87,16 @@ public class Map : MonoBehaviour
     // 장애물
     private Queue<GameObject> obstacleQueue = new Queue<GameObject>();
     private int tilesSinceLastObstacle;
+
+    [Header("Obstacle Type Change Settings")]
+    [Tooltip("슬라이드↔일반 장애물 전환 시 최소 타일 텀")]
+    public int typeChangeTileGap = 2;
+
+    // 장애물 청크
+    private int        obstacleChunkLeft   = 0;
+    private GameObject obstacleChunkPrefab = null; // null = 혼합, non-null = 고정 종류
+    private float      obstacleChunkYOffset = 0f;
+    private bool       lastObstacleWasSlide = false;
 
     // 구멍 ±3타일 보호
     private int scheduledGapIn   = 0;  // 몇 타일 후에 gap 시작 (0 = 예약 없음)
@@ -162,6 +180,10 @@ public class Map : MonoBehaviour
         jellyArcStartX         = float.MaxValue;
         jellyArcEndX           = float.MaxValue;
         tilesSinceLastObstacle = obstacleMinGap;
+        obstacleChunkLeft      = 0;
+        obstacleChunkPrefab    = null;
+        obstacleChunkYOffset   = 0f;
+        lastObstacleWasSlide   = false;
     }
 
     void CalculateTileSize()
@@ -285,25 +307,48 @@ public class Map : MonoBehaviour
 
     void SpawnObstacle(float posX)
     {
-        if (obstaclePrefab == null) return;
-        float posY = fixedY + tileHeight * 0.5f + obstacleOffsetY;
-        var obs = Instantiate(obstaclePrefab, new Vector3(posX, posY, 0f), Quaternion.identity, transform);
+        if (obstacleDatabase == null) return;
+        var entry = obstacleDatabase.GetRandomEntry();
+        if (entry?.prefab == null || IsTypeChangeTooSoon(entry.yOffset > 0f)) return;
+        SpawnObstacleWithPrefab(posX, entry.prefab, entry.yOffset, false);
+    }
+
+    // extendArc=true: arc 시작 X 유지, 끝 X와 높이만 확장 (청크 연속 스폰용)
+    void SpawnObstacleWithPrefab(float posX, GameObject prefab, float entryYOffset, bool extendArc)
+    {
+        float tileTop = fixedY + tileHeight * 0.5f;
+
+        // 임시 위치에 생성 후 높이 측정 → 콜라이더 하단을 타일 상단에 정렬
+        var obs = Instantiate(prefab, new Vector3(posX, tileTop, 0f), Quaternion.identity, transform);
+        float obsHeight = GetObjectHeight(obs);
+        float posY      = tileTop + obsHeight * 0.5f + obstacleOffsetY + entryYOffset;
+        obs.transform.position = new Vector3(posX, posY, 0f);
+
         obstacleQueue.Enqueue(obs);
         tilesSinceLastObstacle = 0;
 
-        // 장애물 높이 측정
-        float obsHeight = GetObjectHeight(obs);
+        bool isSlideObstacle   = entryYOffset > 0f;
+        lastObstacleWasSlide   = isSlideObstacle;
 
-        // 장애물 꼭대기 Y
-        float obstacleTop = posY + obsHeight * 0.5f;
+        if (!isSlideObstacle)
+        {
+            // 일반 장애물: 장애물 위로 젤리 아크
+            float obstacleTop = posY + obsHeight * 0.5f;
+            float groundBase  = tileTop + jellyBaseOffsetY;
+            float peakOffset  = Mathf.Max(obstacleTop - groundBase + obstacleJellyClearance, 0.3f) * 1.3f;
 
-        // groundBase 위로 얼마나 올려야 꼭대기를 넘는지
-        float groundBase = fixedY + tileHeight * 0.5f + jellyBaseOffsetY;
-        jellyArcPeakOffset = Mathf.Max(obstacleTop - groundBase + obstacleJellyClearance, 0.3f) * 1.3f;
-
-        // 앞 타일 ~ 뒷 타일까지 arc 범위 (정확히 3칸)
-        jellyArcStartX = posX - tileWidth;
-        jellyArcEndX   = posX + tileWidth;
+            if (!extendArc)
+            {
+                jellyArcStartX     = posX - tileWidth;
+                jellyArcPeakOffset = peakOffset;
+            }
+            else
+            {
+                jellyArcPeakOffset = Mathf.Max(jellyArcPeakOffset, peakOffset);
+            }
+            jellyArcEndX = posX + tileWidth;
+        }
+        // 슬라이드 장애물: 젤리 아크 미설정 → 장애물 구간도 groundBase 높이로 평탄하게 유지
     }
 
     float GetObjectHeight(GameObject obj)
@@ -314,6 +359,9 @@ public class Map : MonoBehaviour
         if (col != null) return col.bounds.size.y;
         return obj.transform.localScale.y;
     }
+
+    bool IsTypeChangeTooSoon(bool candidateIsSlide)
+        => candidateIsSlide != lastObstacleWasSlide && tilesSinceLastObstacle < typeChangeTileGap;
 
     // 타일 루프: 젤리보다 1타일 앞서 실행 + 구멍 ±3타일 look-ahead
     void SpawnTilesIfNeeded()
@@ -356,18 +404,75 @@ public class Map : MonoBehaviour
                     // 일반 구간: gap 또는 장애물 결정
                     bool nearGap = gapPostCooldown > 0;
 
-                    if (!nearGap && Random.value < gapChance)
+                    // gap 근처면 진행 중인 청크 강제 종료
+                    if (nearGap) obstacleChunkLeft = 0;
+
+                    if (obstacleChunkLeft > 0)
+                    {
+                        // 청크 연속 스폰
+                        if (obstacleChunkPrefab != null)
+                        {
+                            SpawnObstacleWithPrefab(nextSpawnX, obstacleChunkPrefab, obstacleChunkYOffset, true);
+                        }
+                        else
+                        {
+                            var chunkEntry = obstacleDatabase?.GetRandomEntry();
+                            if (chunkEntry?.prefab != null && !IsTypeChangeTooSoon(chunkEntry.yOffset > 0f))
+                                SpawnObstacleWithPrefab(nextSpawnX, chunkEntry.prefab, chunkEntry.yOffset, true);
+                            else
+                                tilesSinceLastObstacle++;
+                        }
+                        obstacleChunkLeft--;
+                    }
+                    else if (!nearGap && Random.value < gapChance)
                     {
                         // 구멍을 3타일 뒤로 예약 → 현재 타일 포함 3타일이 pre-gap 보호
-                        scheduledGapSize = Random.Range(minGapSize, maxGapSize + 1);
-                        scheduledGapIn   = 3;
+                        scheduledGapSize    = Random.Range(minGapSize, maxGapSize + 1);
+                        scheduledGapIn      = 3;
+                        obstacleChunkLeft   = 0;
                         tilesSinceLastObstacle++;
                     }
                     else
                     {
-                        bool canSpawn = !nearGap && tilesSinceLastObstacle >= obstacleMinGap;
+                        bool canSpawn = !nearGap
+                                 && obstacleDatabase != null
+                                 && tilesSinceLastObstacle >= obstacleMinGap;
                         if (canSpawn && Random.value < obstacleChance)
-                            SpawnObstacle(nextSpawnX);
+                        {
+                            float r = Random.value;
+                            if (r < chunkTripleChance)
+                            {
+                                // 같은 종류 청크: entry의 maxConsecutive로 연속 횟수 결정
+                                var entry = obstacleDatabase.GetRandomEntry();
+                                if (entry?.prefab != null && !IsTypeChangeTooSoon(entry.yOffset > 0f))
+                                {
+                                    SpawnObstacleWithPrefab(nextSpawnX, entry.prefab, entry.yOffset, false);
+                                    obstacleChunkLeft    = Mathf.Max(0, entry.maxConsecutive - 1);
+                                    obstacleChunkPrefab  = entry.prefab;
+                                    obstacleChunkYOffset = entry.yOffset;
+                                }
+                                else tilesSinceLastObstacle++;
+                            }
+                            else if (r < chunkTripleChance + chunkDoubleChance)
+                            {
+                                // 2연속: 혼합 가능
+                                var entry2 = obstacleDatabase.GetRandomEntry();
+                                if (entry2?.prefab != null && !IsTypeChangeTooSoon(entry2.yOffset > 0f))
+                                {
+                                    SpawnObstacleWithPrefab(nextSpawnX, entry2.prefab, entry2.yOffset, false);
+                                    obstacleChunkLeft    = 1;
+                                    obstacleChunkPrefab  = null;
+                                    obstacleChunkYOffset = 0f;
+                                }
+                                else tilesSinceLastObstacle++;
+                            }
+                            else
+                            {
+                                // 단일 장애물
+                                SpawnObstacle(nextSpawnX);
+                                obstacleChunkLeft = 0;
+                            }
+                        }
                         else
                             tilesSinceLastObstacle++;
                     }
@@ -390,9 +495,25 @@ public class Map : MonoBehaviour
             bool inArc = nextJellyX >= jellyArcStartX && nextJellyX <= jellyArcEndX;
             if (inArc)
             {
-                float span = jellyArcEndX - jellyArcStartX;
-                float t    = span > 0f ? (nextJellyX - jellyArcStartX) / span : 0.5f;
-                posY = groundBase + jellyArcPeakOffset * Mathf.Sin(t * Mathf.PI);
+                // 상승(tileWidth) → 평탄 → 하강(tileWidth) 형태
+                // 장애물 n연 시 중간이 flat하게 유지됨
+                float riseEnd   = jellyArcStartX + tileWidth;
+                float fallStart = jellyArcEndX   - tileWidth;
+
+                if (nextJellyX <= riseEnd)
+                {
+                    float t = tileWidth > 0f ? (nextJellyX - jellyArcStartX) / tileWidth : 1f;
+                    posY = groundBase + jellyArcPeakOffset * Mathf.Sin(t * Mathf.PI * 0.5f);
+                }
+                else if (nextJellyX >= fallStart)
+                {
+                    float t = tileWidth > 0f ? (nextJellyX - fallStart) / tileWidth : 0f;
+                    posY = groundBase + jellyArcPeakOffset * Mathf.Cos(t * Mathf.PI * 0.5f);
+                }
+                else
+                {
+                    posY = groundBase + jellyArcPeakOffset;
+                }
             }
             else
             {
